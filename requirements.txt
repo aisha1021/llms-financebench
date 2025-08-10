@@ -1,0 +1,13 @@
+transformers
+accelerate
+peft
+bitsandbytes
+datasets
+langchain
+faiss-cpu
+trl
+sentence-transformers
+langchain-community
+llama-cpp-python
+
+# pip install --user -r requirements.txt
