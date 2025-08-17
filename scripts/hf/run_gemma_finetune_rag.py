@@ -14,9 +14,15 @@ from transformers import (
     Trainer
 )
 from peft import get_peft_model, LoraConfig
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import FAISS
 from langchain.schema import Document
 from langchain.prompts import PromptTemplate
 from transformers import BitsAndBytesConfig
+import numpy as np
+from scipy.stats import pointbiserialr, bootstrap
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 df = load_dataset("PatronusAI/financebench", split="train").to_pandas()
 df = df[df['question_type'].isin(['metrics-generated', 'novel-generated', 'domain-relevant'])].copy()
@@ -61,7 +67,7 @@ def make_ft_prompt(row):
             "Using the following context, answer the question with only the final numeric value.\n"
             "Respond with only the number and no explanation.\n"
             "If the number is a percentage or ratio, include decimals as needed.\n\n"
-            "Context:\n{context}\n\nQuestion: {question}\nAnswer: {answer}:"
+            "Context:\n{context}\n\nQuestion: {question}\nAnswer:"
         )
     else:
         answer = str(row.actual_answer)
@@ -69,10 +75,11 @@ def make_ft_prompt(row):
             "You are a financial analysis assistant.\n"
             "Using the context below, answer the question in 1–2 clear and concise sentences.\n"
             "Provide an explanation if the question asks for one. Avoid generic explanations. Start your answer directly.\n\n"
-            "Context:\n{context}\n\nQuestion: {question}\nAnswer: {answer}"
+            "Context:\n{context}\n\nQuestion: {question}\nAnswer:"
         )
     
     return prompt.format(context=context, question=question, answer=answer)
+
 
 df['text'] = df.apply(make_ft_prompt, axis=1)
 df_train, df_test = train_test_split(df, test_size=0.8, stratify=df['question_type'], random_state=42)
@@ -111,6 +118,15 @@ def semantic_match(pred, actual_text, threshold=0.80):
     score = util.cos_sim(emb_p, emb_a).item()
     return score, score >= threshold
 
+base_models = {
+    "TinyLLaMA 1.1B": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "Phi-2": "microsoft/phi-2",
+    "DeepSeek Coder 1.3B": "deepseek-ai/deepseek-coder-1.3b-base",
+    "Gemma 2B IT": "google/gemma-2-2b-it"
+}
+
+splitter = RecursiveCharacterTextSplitter(chunk_size=256, chunk_overlap=50)
+emb_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", model_kwargs={"device": "cpu"})
 semantic_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device="cpu")
 
 prompt_numeric = PromptTemplate(
@@ -134,22 +150,20 @@ prompt_semantic = PromptTemplate(
     )
 )
 
-def get_pred(row, model, tokenizer, max_prompt_len_ratio=0.9):
-    context = clean_context(row.evidence)
+def get_pred(row, model, tokenizer):
+    full_text = clean_context(row.evidence)
+    chunks = splitter.split_text(full_text)
+    docs = [Document(page_content=c) for c in chunks]
+    
+    db = FAISS.from_documents(docs, emb_model)
+    
+    retrieved_docs = db.similarity_search(row.question, k=3)
+    context = "\n".join([doc.page_content for doc in retrieved_docs])
     
     chosen_prompt = prompt_numeric if row.question_type == "metrics-generated" else prompt_semantic
+
     inp = chosen_prompt.format(context=context, question=row.question)
-
-    safe_max_len = min(getattr(tokenizer, "model_max_length", 2048), 4096)
-    
-    tokenized_len = len(tokenizer(inp)['input_ids'])
-    max_allowed = int(safe_max_len * max_prompt_len_ratio)
-
-
-    if tokenized_len > max_allowed:
-        inp = f"You are a financial analyst. Using the context below, answer the question in 1–2 clear and concise sentences. Context:\n{context} \nQuestion: {row.question}\nAnswer:"
-
-    inputs = tokenizer(inp, return_tensors="pt", truncation=True, max_length=safe_max_len).to(model.device)
+    inputs = tokenizer(inp, return_tensors="pt", truncation=True, max_length=512).to(model.device)
 
     out = model.generate(
         **inputs,
@@ -161,11 +175,12 @@ def get_pred(row, model, tokenizer, max_prompt_len_ratio=0.9):
 
     decoded = tokenizer.decode(out[0], skip_special_tokens=True)
 
+
     if row.question_type == "metrics-generated":
         pred = extract_answer(decoded, inp)
     else:
         pred = decoded.replace(inp, "").strip()
-
+        
     return pred
 
 def find_lora_target_modules(model):
@@ -189,7 +204,7 @@ def run_model_iteration(model_name, model_id, train_dataset, test_df, all_result
     
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        device_map={"": torch.cuda.current_device()},
+        device_map="auto",
         quantization_config=quant_config,
         trust_remote_code=True
     )
@@ -349,5 +364,5 @@ for model_name, model_data in all_results.items():
 
 combined_results_df = pd.concat(per_model_res.values(), ignore_index=True)
 combined_errors_df = pd.concat(per_model_err.values(), ignore_index=True)
-combined_results_df.to_csv("results/hf_gemma-2-2b-it_base_model_finetune_results.csv", index=False)
-combined_errors_df.to_csv("results/hf_gemma-2-2b-it_base_model_finetune_errors.csv", index=False)
+combined_results_df.to_csv("results/hf_gemma-2-2b-it_base_model_RAG_finetune_results.csv", index=False)
+combined_errors_df.to_csv("results/hf_gemma-2-2b-it_base_model_RAG_finetune_errors.csv", index=False)
