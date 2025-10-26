@@ -69,7 +69,7 @@ Applied Structures:
 * Gemma consistently outperformed other small models across all structures.
 * Fine-tuned RAG performed worse than zero-shot RAG, suggesting that fine-tuning does not always improve retrieval-augmented performance.
 
-
+![HF Results](https://github.com/aisha1021/llms-financebench/blob/78ef6ec6e03c638fb3ab50ea2d004b4dd626e725/hf_model_results.png)
 
 ### GUFF Models
 
